@@ -1,14 +1,14 @@
 {
   "name": "german-flash-bot",
   "version": "1.0.0",
-  "description": "Backend for Telegram Mini App",
+  "description": "",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
+    "express": "^4.18.2",
     "axios": "^1.6.0",
-    "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "cors": "^2.8.5"
   }
 }
