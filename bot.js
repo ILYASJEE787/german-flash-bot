@@ -7,7 +7,6 @@ const app      = express();
 app.use(cors());
 app.use(express.json());
  
-// ─── CONFIG ───
 const BOT_TOKEN  = "8790609389:AAH419MC4YuZpBLOeKYEVL6h9WxPshEkQRU";
 const ADMIN_CHAT = "8495740508";
 const PORT       = process.env.PORT || 3000;
@@ -15,22 +14,16 @@ const TG         = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const MONGO_URI  = process.env.MONGO_URI ||
   "mongodb+srv://admin:8_gMbMCx8K7EkVx@cluster0.unhgtfd.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
  
-// ═══════════════════════════════════════════════
-// MONGOOSE
-// ═══════════════════════════════════════════════
 mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB Connected"))
-  .catch(e  => console.error("❌ MongoDB Error:", e.message));
+  .then(() => console.log("MongoDB Connected"))
+  .catch(e  => console.error("MongoDB Error:", e.message));
  
-// ═══════════════════════════════════════════════
-// ORDER SCHEMA
-// plan = "ARB-TOPUP" for arbitrage top-ups
-// ═══════════════════════════════════════════════
+// Schema handles: Flash orders, ARB-TOPUP, WITHDRAW
 const orderSchema = new mongoose.Schema({
   userId:     { type: String, required: true },
   name:       { type: String, default: "User" },
   username:   { type: String, default: "" },
-  plan:       { type: String, required: true },
+  plan:       { type: String, required: true }, // STARTER|PRO|ELITE|VIP|ARB-TOPUP|WITHDRAW
   fee:        { type: String, default: "" },
   amount:     { type: String, default: "" },
   userWallet: { type: String, default: "NOT PROVIDED" },
@@ -39,23 +32,17 @@ const orderSchema = new mongoose.Schema({
   status:     { type: String, enum: ["pending","approved","rejected"], default: "pending" },
   adminNote:  { type: String, default: "" },
   date:       { type: String, default: "" },
-  createdAt:  { type: Date,   default: Date.now }
+  createdAt:  { type: Date, default: Date.now }
 });
- 
 const Order = mongoose.model("Order", orderSchema);
  
 async function tgSend(chatId, text, extra = {}) {
   try {
-    await axios.post(`${TG}/sendMessage`, {
-      chat_id: chatId, text, parse_mode: "HTML", ...extra
-    });
-  } catch (e) { console.error("TG Send Error:", e.message); }
+    await axios.post(`${TG}/sendMessage`, { chat_id: chatId, text, parse_mode: "HTML", ...extra });
+  } catch (e) { console.error("TG Error:", e.message); }
 }
  
-// ═══════════════════════════════════════════════
-// WEBHOOK — Admin Approve / Reject
-// Works for BOTH flash orders AND arbitrage top-ups
-// ═══════════════════════════════════════════════
+// ═══ WEBHOOK: Admin Approve / Reject ═══
 app.post("/webhook", async (req, res) => {
   const u = req.body;
  
@@ -65,221 +52,190 @@ app.post("/webhook", async (req, res) => {
     const msgId  = u.callback_query.message.message_id;
     const fromId = String(u.callback_query.from.id);
  
-    // Security: only admin can act
-    if (chatId !== ADMIN_CHAT && fromId !== ADMIN_CHAT) {
-      return res.sendStatus(200);
-    }
+    if (chatId !== ADMIN_CHAT && fromId !== ADMIN_CHAT) return res.sendStatus(200);
     if (data === "done") return res.sendStatus(200);
  
     const sepIdx = data.indexOf("_");
     if (sepIdx === -1) return res.sendStatus(200);
- 
     const action = data.substring(0, sepIdx);
     const txid   = data.substring(sepIdx + 1);
- 
     if (!txid || (action !== "approve" && action !== "reject")) return res.sendStatus(200);
  
     try {
       const order = await Order.findOne({ txid });
- 
       if (!order) {
-        await tgSend(chatId, `⚠️ Order not found for TxID:\n<code>${txid}</code>`);
+        await tgSend(chatId, `Order not found for TxID:\n<code>${txid}</code>`);
         return res.sendStatus(200);
       }
- 
       if (order.status !== "pending") {
-        await tgSend(chatId, `ℹ️ Pehle hi action ho chuka hai. Status: <b>${order.status.toUpperCase()}</b>`);
+        await tgSend(chatId, `Already processed. Status: <b>${order.status.toUpperCase()}</b>`);
         return res.sendStatus(200);
       }
  
-      const isTopup = order.plan === "ARB-TOPUP";
+      const isWithdraw = order.plan === "WITHDRAW";
+      const isTopup    = order.plan === "ARB-TOPUP";
  
       if (action === "approve") {
-        const updated = await Order.findOneAndUpdate(
+        await Order.findOneAndUpdate(
           { txid, status: "pending" },
-          { status: "approved", adminNote: isTopup ? "Balance credited to arbitrage wallet." : "Flash USDT delivery in progress." },
+          { status: "approved", adminNote: isWithdraw ? "Withdrawal processed." : isTopup ? "Balance credited." : "Flash USDT delivery in progress." },
           { new: true }
         );
-        if (!updated) { await tgSend(chatId, `⚠️ Already processed.`); return res.sendStatus(200); }
  
-        if (isTopup) {
+        if (isWithdraw) {
           await tgSend(chatId,
-            `✅ <b>BALANCE TOP-UP APPROVED!</b>\n\n` +
-            `👤 User: ${order.name} (@${order.username || "none"})\n` +
-            `💰 Amount: ${order.fee}\n` +
-            `🌐 Network: ${order.network}\n` +
-            `🔑 TxID: <code>${txid}</code>`
+            `WITHDRAWAL APPROVED!\n\n` +
+            `User: ${order.name} (@${order.username || "none"})\n` +
+            `Amount: ${order.fee}\n` +
+            `Network: ${order.network}\n` +
+            `USDT sent to:\n<code>${order.userWallet}</code>`
+          );
+        } else if (isTopup) {
+          await tgSend(chatId,
+            `BALANCE TOP-UP APPROVED!\n\n` +
+            `User: ${order.name} (@${order.username || "none"})\n` +
+            `Amount: ${order.fee}\n` +
+            `Network: ${order.network}\n` +
+            `TxID: <code>${txid}</code>`
           );
         } else {
           await tgSend(chatId,
-            `✅ <b>ORDER APPROVED!</b>\n\n` +
-            `👤 User: ${order.name} (@${order.username || "none"})\n` +
-            `📦 Plan: ${order.plan}\n` +
-            `💳 Deliver Flash USDT to:\n<code>${order.userWallet}</code>`
+            `ORDER APPROVED!\n\n` +
+            `User: ${order.name} (@${order.username || "none"})\n` +
+            `Plan: ${order.plan}\n` +
+            `Deliver Flash USDT to:\n<code>${order.userWallet}</code>`
           );
         }
  
         try {
           await axios.post(`${TG}/editMessageReplyMarkup`, {
             chat_id: chatId, message_id: msgId,
-            reply_markup: { inline_keyboard: [[{ text: "✅ APPROVED", callback_data: "done" }]] }
+            reply_markup: { inline_keyboard: [[{ text: "APPROVED", callback_data: "done" }]] }
           });
         } catch(e) {}
  
       } else if (action === "reject") {
-        const updated = await Order.findOneAndUpdate(
+        await Order.findOneAndUpdate(
           { txid, status: "pending" },
-          { status: "rejected", adminNote: "TxID could not be verified. Please contact support." },
+          { status: "rejected", adminNote: "Could not be verified. Please contact support." },
           { new: true }
         );
-        if (!updated) { await tgSend(chatId, `⚠️ Already processed.`); return res.sendStatus(200); }
  
+        const typeLabel = isWithdraw ? "WITHDRAWAL" : isTopup ? "TOP-UP" : "ORDER";
         await tgSend(chatId,
-          `❌ <b>${isTopup ? "TOP-UP" : "ORDER"} REJECTED!</b>\n\n` +
-          `👤 User: ${order.name}\n` +
-          `${isTopup ? "💰 Amount: "+order.fee : "📦 Plan: "+order.plan}`
+          `${typeLabel} REJECTED!\n\n` +
+          `User: ${order.name}\n` +
+          (isWithdraw || isTopup ? `Amount: ${order.fee}` : `Plan: ${order.plan}`)
         );
  
         try {
           await axios.post(`${TG}/editMessageReplyMarkup`, {
             chat_id: chatId, message_id: msgId,
-            reply_markup: { inline_keyboard: [[{ text: "❌ REJECTED", callback_data: "done" }]] }
+            reply_markup: { inline_keyboard: [[{ text: "REJECTED", callback_data: "done" }]] }
           });
         } catch(e) {}
       }
  
-    } catch (e) {
-      console.error("Webhook error:", e.message);
-    }
+    } catch (e) { console.error("Webhook error:", e.message); }
   }
  
   if (u.message && u.message.text === "/start") {
-    await tgSend(u.message.chat.id, "✅ German Flash Bot is Online. MongoDB connected.");
+    await tgSend(u.message.chat.id, "German Flash Bot is Online. MongoDB connected.");
   }
- 
   res.sendStatus(200);
 });
  
-// ═══════════════════════════════════════════════
-// POST /api/orders
-// Handles BOTH flash orders (plan = STARTER/PRO/etc)
-// AND arbitrage top-ups (plan = ARB-TOPUP)
-// ═══════════════════════════════════════════════
+// ═══ POST /api/orders — Flash orders, ARB-TOPUP, WITHDRAW ═══
 app.post("/api/orders", async (req, res) => {
   const { userId, name, username, plan, fee, amount, userWallet, network, txid, date } = req.body;
- 
-  if (!txid || !plan) {
-    return res.status(400).json({ ok: false, error: "Missing txid or plan" });
-  }
+  if (!txid || !plan) return res.status(400).json({ ok: false, error: "Missing txid or plan" });
  
   try {
     const existing = await Order.findOne({ txid });
-    if (existing) {
-      return res.status(409).json({ ok: false, error: "TxID already submitted." });
+    if (existing) return res.status(409).json({ ok: false, error: "TxID already submitted." });
+ 
+    await Order.create({ userId: userId || "unknown", name: name || "User", username: username || "",
+      plan, fee, amount, userWallet: userWallet || "NOT PROVIDED", network, txid,
+      status: "pending", adminNote: "", date: date || new Date().toLocaleDateString() });
+ 
+    const isWithdraw = plan === "WITHDRAW";
+    const isTopup    = plan === "ARB-TOPUP";
+ 
+    let msg = "";
+    if (isWithdraw) {
+      msg = `WITHDRAWAL REQUEST\n\n` +
+        `User: ${name} (@${username || "none"})\n` +
+        `ID: ${userId}\n` +
+        `Amount: ${fee}\n` +
+        `Network: ${network}\n` +
+        `Send USDT to:\n<code>${userWallet || "NOT PROVIDED"}</code>\n` +
+        `Ref: <code>${txid}</code>\n` +
+        `Date: ${date}`;
+    } else if (isTopup) {
+      msg = `BALANCE TOP-UP REQUEST\n\n` +
+        `User: ${name} (@${username || "none"})\n` +
+        `ID: ${userId}\n` +
+        `Amount: ${fee}\n` +
+        `Network: ${network}\n` +
+        `TxID:\n<code>${txid}</code>\n` +
+        `Date: ${date}`;
+    } else {
+      msg = `NEW ORDER!\n\n` +
+        `User: ${name} (@${username || "none"})\n` +
+        `ID: ${userId}\n` +
+        `Plan: ${plan} | Fee: ${fee}\n` +
+        `Receive: ${amount}\n` +
+        `Network: ${network}\n` +
+        `User Wallet:\n<code>${userWallet || "NOT PROVIDED"}</code>\n` +
+        `TxID:\n<code>${txid}</code>\n` +
+        `Date: ${date}`;
     }
  
-    await Order.create({
-      userId: userId || "unknown",
-      name:   name   || "User",
-      username: username || "",
-      plan, fee, amount,
-      userWallet: userWallet || "NOT PROVIDED",
-      network, txid,
-      status:    "pending",
-      adminNote: "",
-      date:      date || new Date().toLocaleDateString()
-    });
- 
-    const isTopup = plan === "ARB-TOPUP";
- 
-    const msg = isTopup
-      ? `💳 <b>BALANCE TOP-UP REQUEST</b>\n\n` +
-        `👤 User: ${name} (@${username || "none"})\n` +
-        `🆔 ID: ${userId}\n` +
-        `💰 Amount: ${fee}\n` +
-        `🌐 Network: ${network}\n` +
-        `🔑 TxID:\n<code>${txid}</code>\n` +
-        `📅 Date: ${date}`
-      : `🔔 <b>NEW ORDER!</b>\n\n` +
-        `👤 User: ${name} (@${username || "none"})\n` +
-        `🆔 ID: ${userId}\n` +
-        `📦 Plan: ${plan} | Fee: ${fee}\n` +
-        `💰 Receive: ${amount}\n` +
-        `🌐 Network: ${network}\n` +
-        `👛 User Wallet:\n<code>${userWallet || "NOT PROVIDED"}</code>\n` +
-        `🔑 TxID:\n<code>${txid}</code>\n` +
-        `📅 Date: ${date}`;
- 
+    const approveLabel = isWithdraw ? "Approve Withdrawal" : isTopup ? "Credit Balance" : "Approve";
     await tgSend(ADMIN_CHAT, msg, {
       reply_markup: {
         inline_keyboard: [[
-          { text: isTopup ? "✅ Credit Balance" : "✅ Approve", callback_data: `approve_${txid}` },
-          { text: "❌ Reject", callback_data: `reject_${txid}` }
+          { text: approveLabel, callback_data: `approve_${txid}` },
+          { text: "Reject",    callback_data: `reject_${txid}`  }
         ]]
       }
     });
  
     res.json({ ok: true, success: true });
- 
   } catch (e) {
-    console.error("Order create error:", e.message);
+    console.error("Order error:", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
  
-// ═══════════════════════════════════════════════
-// GET /api/status/:txid — Frontend polls every 5s
-// ═══════════════════════════════════════════════
+// ═══ GET /api/status/:txid ═══
 app.get("/api/status/:txid", async (req, res) => {
   try {
-    const txid = req.params.txid;
-    if (!txid || !txid.trim()) return res.json({ status: "pending", adminNote: "" });
- 
-    const order = await Order.findOne(
-      { txid: txid.trim() },
-      { status: 1, adminNote: 1, _id: 0 }
-    );
- 
+    const order = await Order.findOne({ txid: req.params.txid.trim() }, { status: 1, adminNote: 1, _id: 0 });
     if (!order || order.status === "pending") return res.json({ status: "pending", adminNote: "" });
- 
     res.json({ status: order.status, adminNote: order.adminNote || "" });
- 
-  } catch (e) {
-    console.error("Status check error:", e.message);
-    res.json({ status: "pending", adminNote: "" });
-  }
+  } catch (e) { res.json({ status: "pending", adminNote: "" }); }
 });
  
-// ═══════════════════════════════════════════════
-// POST /api/balance — kept for backward compat
-// (now handled by /api/orders with plan=ARB-TOPUP)
-// ═══════════════════════════════════════════════
+// ═══ POST /api/balance (backward compat) ═══
 app.post("/api/balance", async (req, res) => {
-  // Just forward to /api/orders logic
   const { userId, name, amount, network, txid, date } = req.body;
   if (!txid) return res.status(400).json({ ok: false, error: "Missing txid" });
-  await tgSend(ADMIN_CHAT,
-    `💳 <b>BALANCE TOP-UP (legacy)</b>\n\n` +
-    `👤 User: ${name} | ID: ${userId}\n` +
-    `💰 Amount: $${amount} ${network}\n` +
-    `🔑 TxID: <code>${txid}</code>\n📅 ${date}`
-  );
+  await tgSend(ADMIN_CHAT, `BALANCE TOP-UP\nUser: ${name} | $${amount} ${network}\nTxID: <code>${txid}</code>`);
   res.json({ ok: true });
 });
  
-// ─── Webhook setup ───
 app.get("/set-webhook", async (req, res) => {
   const { url } = req.query;
   if (!url) return res.send("Add ?url=https://your-app.up.railway.app/webhook");
-  try {
-    const r = await axios.post(`${TG}/setWebhook`, { url });
-    res.send(`✅ Webhook Set! ${JSON.stringify(r.data)}`);
-  } catch (e) { res.send("Error: " + e.message); }
+  try { const r = await axios.post(`${TG}/setWebhook`, { url }); res.send(`Webhook Set! ${JSON.stringify(r.data)}`); }
+  catch (e) { res.send("Error: " + e.message); }
 });
  
 app.get("/", (req, res) => {
   const states = ["disconnected","connected","connecting","disconnecting"];
-  res.send(`✅ German Flash Bot | DB: ${states[mongoose.connection.readyState]}`);
+  res.send(`German Flash Bot | DB: ${states[mongoose.connection.readyState]}`);
 });
  
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Server on port ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`Server on port ${PORT}`));
+ 
